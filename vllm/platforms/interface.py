@@ -639,10 +639,15 @@ class Platform:
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
+            logger.info(
+                "Before:", attn_block_size,
+            )
 
         # Ensure attn_block_size is a power of 2
         attn_block_size = 1 << (attn_block_size - 1).bit_length()
-
+        logger.info(
+                "After:", attn_block_size,
+        )
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(
