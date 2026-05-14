@@ -589,6 +589,9 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
+            logger.info(f"Attention page size for 1 token: {attn_page_size_1_token} bytes")
+            logger.info(f"kv_cache_dtype: {kv_cache_dtype}, kv_quant_mode: {kv_quant_mode}")
+            logger.info(f"num_kv_heads: {model_config.get_num_kv_heads(parallel_config)}, head_size: {model_config.get_head_size()}")
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -600,78 +603,93 @@ class Platform:
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
             block_size=-1,
         ).page_size_bytes
+        logger.info(f"shapes for mamba state: {model_cls.get_mamba_state_shape_from_config(vllm_config)}, dtypes for mamba state: {model_cls.get_mamba_state_dtype_from_config(vllm_config)}")
 
         if mamba_page_size == 0:
             return
 
-        # mamba_block_size here should either be user specified value or None
-        mamba_block_size = (
-            cache_config.mamba_block_size
-            if cache_config.user_specified_mamba_block_size
-            else None
-        )
+        # # mamba_block_size here should either be user specified value or None
+        # mamba_block_size = (
+        #     cache_config.mamba_block_size
+        #     if cache_config.user_specified_mamba_block_size
+        #     else None
+        # )
+        # logger.info(f"mamba_page_size: {mamba_page_size} bytes, attn_page_size_1_token: {attn_page_size_1_token} bytes")
+        # logger.info(f"mamba_block_size: {mamba_block_size}")
+        # # Get kernel block alignment from the backend's supported sizes
+        # with set_current_vllm_config(vllm_config):
+        #     kernel_block_alignment_size = max(
+        #         min(
+        #             s.base if isinstance(s, MultipleOf) else s
+        #             for s in backend_cls.get_supported_kernel_block_sizes()
+        #         ),
+        #         cache_config.block_size,
+        #     )
+        #     logger.info(f"cache_config.block_size: {cache_config.block_size}")
+        #     for s in backend_cls.get_supported_kernel_block_sizes():
+        #         if isinstance(s, MultipleOf):
+        #             logger.info(f"Supported kernel block size: multiple of {s.base} tokens")
+        #         else:
+        #             logger.info(f"Supported kernel block size: {s} tokens")
+        #     logger.info(f"Chosen kernel block alignment size: {kernel_block_alignment_size} tokens")
 
-        # Get kernel block alignment from the backend's supported sizes
-        with set_current_vllm_config(vllm_config):
-            kernel_block_alignment_size = max(
-                min(
-                    s.base if isinstance(s, MultipleOf) else s
-                    for s in backend_cls.get_supported_kernel_block_sizes()
-                ),
-                cache_config.block_size,
-            )
+        # if cache_config.mamba_cache_mode == "all":
+        #     # With prefix caching, align to mamba chunk size for kernel perf
+        #     # TODO(tdoublep): this constraint can be relaxed fairly
+        #     # easily by changing the way we layout chunks in the
+        #     # mamba2 kernels.
+        #     base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+        #     assert base_chunk_size is not None
+        #     attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
+        #     chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
+        #     attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+        #     cache_config.mamba_block_size = attn_block_size
+        #     logger.info(f"chunk_size: {chunk_size}, attn_tokens_per_mamba_state: {attn_tokens_per_mamba_state}, attn_block_size: {attn_block_size}")
+        #     logger.info(f"Setting mamba block size to {attn_block_size}")
+        # else:
+        #     # Without prefix caching, use minimum block size that satisfies
+        #     # both backend alignment and mamba page size compatibility
+        #     attn_block_size = kernel_block_alignment_size * cdiv(
+        #         mamba_page_size,
+        #         kernel_block_alignment_size * attn_page_size_1_token,
+        #     )
+        #     logger.info(f"kernel_block_alignment_size: {kernel_block_alignment_size}, attn_page_size_1_token: {attn_page_size_1_token}, mamba_page_size: {mamba_page_size}, attn_block_size: {attn_block_size}")
+        #     logger.info(f"{mamba_page_size} // {kernel_block_alignment_size * attn_page_size_1_token} = {cdiv(mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token)}")
 
-        if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, align to mamba chunk size for kernel perf
-            # TODO(tdoublep): this constraint can be relaxed fairly
-            # easily by changing the way we layout chunks in the
-            # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            cache_config.mamba_block_size = attn_block_size
-        else:
-            # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
-            )
+        # logger.info(f"attn_block_size: {attn_block_size}")
 
-        if cache_config.block_size < attn_block_size:
-            cache_config.block_size = attn_block_size
-            logger.info(
-                "Setting attention block size to %d tokens "
-                "to ensure that attention page size is >= mamba page size.",
-                attn_block_size,
-            )
+        # if cache_config.block_size < attn_block_size:
+        #     cache_config.block_size = attn_block_size
+        #     logger.info(
+        #         "Setting attention block size to %d tokens "
+        #         "to ensure that attention page size is >= mamba page size.",
+        #         attn_block_size,
+        #     )
 
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
-        assert attn_page_size >= mamba_page_size
+        # assert attn_page_size >= mamba_page_size
 
         if attn_page_size == mamba_page_size:
             return
 
-        if (
-            cache_config.mamba_page_size_padded is None
-            or cache_config.mamba_page_size_padded != attn_page_size
-        ):
-            cache_config.mamba_page_size_padded = attn_page_size
-            mamba_padding_pct = (
-                100 * (attn_page_size - mamba_page_size) / mamba_page_size
-            )
-            logger.info(
-                "Padding mamba page size by %.2f%% to ensure "
-                "that mamba page size and attention page size are "
-                "exactly equal.",
-                mamba_padding_pct,
-            )
+        # if (
+        #     cache_config.mamba_page_size_padded is None
+        #     or cache_config.mamba_page_size_padded != attn_page_size
+        # ):
+        #     cache_config.mamba_page_size_padded = attn_page_size
+        #     mamba_padding_pct = (
+        #         100 * (attn_page_size - mamba_page_size) / mamba_page_size
+        #     )
+        #     logger.info(
+        #         "Padding mamba page size by %.2f%% to ensure "
+        #         "that mamba page size and attention page size are "
+        #         "exactly equal.",
+        #         mamba_padding_pct,
+        #     )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
